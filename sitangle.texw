@@ -1,0 +1,222 @@
+\documentclass[12pt, a4paper]{NGPLB}
+\usepackage{tikz}
+\usepackage[most, minted]{tcolorbox}
+\usepackage{minted}
+\usepackage{etoolbox}
+\usepackage{indentfirst}
+\usepackage{geometry}
+\geometry{top = 2cm, bottom = 2cm, left = 2 cm, right = 2cm}
+\tcbset{fontupper=\small, breakable, skin=bicolor ,listing engine={minted} ,colback=gray!30!white, colbacklower=gray!5!white, colframe=gray!30!white, minted options ={linenos, breaklines, breakanywhere, showtabs = false, tabsize = 4}}
+
+\newtcblisting{myoutput}{fontupper=\small, breakable, skin=bicolor ,colback=gray!30!white, colbacklower=gray!5!white, colframe=gray!30!white listing engine={minted}, listing only, minted language = python}
+
+\newtcblisting{mylisting}{fontupper=\small, breakable, skin=bicolor ,colback=gray!30!white, colbacklower=gray!5!white, colframe=gray!30!white, listing engine={minted}, listing only, minted language = python}
+
+
+\linespread{1.35}
+\title{Siweb}
+\author{Si manglam}
+\pagenumbering{arabic}
+\setlength{\parindent}{24pt}
+\begin{document}
+\maketitle
+\tableofcontents
+
+\chapter{前言}
+我想用 Python 寫一個 Literate Programming 的工具，我現在在用的是 noweb，他有非常簡單的語法，以及強大的 tangle 功能。不過我倒不太喜歡他的 weave 功能，他有寫一個模板，可以照那個模板用，但如果不想按照那個模板就很麻煩。而現在是用 Pweave 來 weave 文件，但 Pweave 只會將程式碼區塊轉成設定的 LaTeX Environment。如果要指定排版還是需要用純 LaTeX 去定義。
+
+我希望寫一個簡單的 Literate Programming 工具，他需要提供以下功能：
+
+\begin{itemize}
+\item 如同 noweb 一般簡單的語法
+\item 可以自行設定 output Language
+\item 對於簡單的 LaTeX 命令可以提供替代
+\item 可以提供一個規範，讓撰寫 documentclass 變得方便
+\end{itemize}
+
+那由於 Literate Programming 分成兩個部分 Weave \& Tangle 就先讓我們處理比較簡單的 Tangle 吧。
+
+\chapter{Tangle}
+
+Tangle 是負責將程式碼區塊從文件中人類語言的部分剝離出來，我希望 Tangle 可以包含以下功能：
+
+\begin{itemize}
+\item 可以將 Root Chunk 內的 Chunk 也一併剝離出
+\item 可以同時剝離出多個 File
+\end{itemize}
+
+大概就是這兩個功能最重要了，那麼接下來就要來實作這些功能了，那 sitangle 的檔案結構如下：
+
+<<sitangle.py>>=
+#!/usr/bin/python3
+<<module>>
+<<全域變數>>
+<<處理參數>>
+<<讀取檔案中並儲存程式碼區塊>>
+<<輸出檔案>>
+@
+
+\section{讀取檔案中並儲存程式碼區塊}
+
+首先，我們先來處理讀取檔案中並儲存程式碼區塊的功能，這部分需要先將程式碼區塊的開始與結束定義出來，目前的想法是套用 noweb 的語法，所以讓我們先把判定規則給寫好再去想後面的事情。
+
+<<讀取檔案中並儲存程式碼區塊>>=
+with open(file_name, "r") as f:
+	for line in f:
+		<<判斷程式碼區塊>>
+		<<符合>>
+		<<不符合>>	
+@
+
+先打開檔案後，慢慢的一行一行讀取檔案中的資料，如果檔案中有符合 <<(程式碼區塊名字，不可含 > )>>= 就會被接下來的判斷式帶到符合或不符合作相應的處理。那接下來先講符合之後該怎麼處理。因為我們想要可以一次就 tangle 出所有所有檔案的功能，所以我們勢必要設定一個全域變數來追蹤 Root Chunk 並在最後對所有 Root Chunk 都進行處理，另外就是我們還要將每一個 Chunk 都儲存起來，並在需要的時候讀取。
+
+我們會先講講該如何儲存每一個 Chunk 再說說該如何根據不同的情況做處理。我們會需要追蹤以下三件事情，目前在的 Chunk、所有的 Chunk 與他們的內容還有所有的 Root\_Chunk，設三個全域變數去追蹤這些事情：
+
+<<全域變數>>=
+root_chunk = []
+chunks = {}
+current_chunk = None
+@
+
+root\_chunk 是負責追蹤所有的 Root Chunks 在需要時可以當作 tangle 檔案的參數，使用 List 來儲存，讓之後可以用 for 迴圈去 Loop。chunks 是用來處理所有的 Chunks 內的內容，因為需要一個一對一的映射關係，所以採用 Dictionary 來儲存他們的名字與值。最後是 current\_chunk 這是負責記錄當前所在的 Chunk，在非 None 的情況下，就代表目前讀到了 Chunk 需要將目前讀到的東西送進這個 Chunk 中，由於 Python 讀檔案是讀成 List 所以我們也用 List 去儲存 Chunk 內的東西。
+
+接下來是判斷是否掃到程式碼區塊，並根據結果進行不同的處理。首先是判斷，這部分會用到 Regex 來協助判斷，所以需要先使用 Python 的 re module 以提供 Regex 的支持：
+
+<<module>>=
+import re
+@
+
+接下來就可以撰寫判斷式了，由於我們要參考的是 noweb 的簡單語法，其語法是 <<(程式碼區塊名稱，不可含 > )>>=，寫成 Regex 就會變成 <<([\^>])>> 這樣，限制是名字內不可以有 >，但可以確保不會不小心涵蓋到過多的範圍。中間用括號包起來的原因是可以把裡面的內容包成一個 group，並可以利用 group 把 Chunk 名稱記下來：
+
+<<判斷程式碼區塊>>=
+match = re.match(r"<<([^>]+)>>=", line)
+@
+
+如果判斷到程式碼區塊就會先查看是否是 Root Chunk，若是便會被加進 root\_chunk 中以便追蹤所有的 Root Chunk，接下來會先判斷現在的 chunk 是否已被讀取過，若沒有便會先在 Chunks 中創建一個與程式碼區塊名稱對應的 List，不然會 KeyError。然後就會將 current\_chunk 設成目前讀到的程式碼區塊名稱，讓接下來的東西可以被送進對的區塊內：
+
+<<符合>>=
+if match:
+	current_chunk = match.group(1)
+	if not current_chunk in chunks:
+		chunks[current_chunk] = []
+	if re.match(r"\S*\.\S+", current_chunk):
+		if not current_chunk in root_chunk:
+			root_chunk.append(current_chunk)
+@
+
+接下來就要來處理不符合的情況，不符合會有兩種情況，第一是已經有掃描到 Chunk 要把接下來的內容送到對應的 Chunk 內，第二是沒有掃到 Chunk 就是用來描述的人類語言。第一種會需要把它存到 current\_chunk 內，第二種就不需要特殊處理。
+
+<<不符合>>=
+else:
+	if current_chunk:
+		match = re.match(r"@[^\S]", line)
+		if match:
+			current_chunk = None
+		else:
+			chunks[current_chunk].append(line)
+@
+
+判定的規則是如果已經讀到了 Chunk 就判定 Chunk 是不是要結束了，如果有單獨的 @ 被讀取到就會把 current\_chunk 設為 None 並跳出，如果沒有就會把目前讀到的東西丟進 chunks 中儲存。
+
+\section{輸出檔案}
+
+輸出檔案會分成兩個部分，第一個是遞迴函數負責將 Chunk 裡面包含的子 Chunk 給剝離出來，另外一部分則是將剝離出來的東西給寫入檔案。除此之外，我們還需解析輸入的參數，若輸入的參數為 all 便需要 tangle 全部的 Root Chunks。所以先讓我們從處理參數開始，再慢慢到輸出檔案的部分。
+
+處理參數使用了 Python 的 sys module，我們必須先 import 這個 module 再進行進一步的分析。另外，我們也需要處理不按照規則的使用者輸入，所以也額外導入 os 來幫助我們直接結束程式。
+
+<<module>>=
+import os, sys
+@
+
+我們的 input 希望可以越簡單越好，目前的想法是想以下這樣 \verb|sitangle chunkname file| 簡簡單單即可。而另設有一保留字 all 只要使用這個就會自動把所有的檔案產生出來。使用 sys.agrv 可以獲取 command line 中指定的參數，並會以 List 的方式供開發者使用。List 的第一項會是檔案的絕對路徑，第二項後才是輸入的文字，為求簡單我們這裡先不考慮以 \-\- 開始的可選選項，先對非 \-\- 開頭的事物做判定。
+
+<<處理參數>>=
+for i in sys.argv[1:]:
+	if i.startswith("--"):
+		<<處理可選選項>>
+	else:
+		if output_chunk and file_name:
+			print("Error, More than two argument")
+			exit(1)
+		elif output_chunk:
+			file_name = i
+		else:
+			output_chunk = i
+@
+
+這裡設置了兩個全域變數，分別是 file\_name 與 output\_chunk 這兩個變數。這兩個變數的預設皆為 None，讀到的第一個非可選選項會先被指定給 output\_chunk， 如果兩個都被設置了卻還有多的參數，就會跳出錯誤訊息並關閉程式。
+
+<<全域變數>>=
+file_name = None
+output_chunk = None
+@
+
+\subsection{輸出檔案}
+
+首先，先讓我們把檔案輸出的部分寫好，我們需要把程式碼剝離出來，並需特別注意兩項事情，第一件是子區塊，需要一個遞迴函式去將其剝離出來，第二是程式碼的縮排，因為有些程式語言對縮排是有特殊要求的。所以先讓我們寫一個用來剝離程式碼的遞迴函數，並同樣利用 Regex 來判定是否有子區塊，若有便 Return 自身，若無便將此行加入 result 中，順便利用例外處理去處理區塊未定義的問題。
+
+<<全域變數>>=
+def expand(chunk_name, indent):
+	result = []
+	try:
+		output_chunk = chunks[chunk_name]
+	except KeyError:
+		print(f"KeyError {chunk_name} undefined")
+		return []
+	for i in output_chunk:
+		match = re.match(r"(\s*)<<([^>]+)>>\s*$", i)
+		if match:
+			result.extend(expand(match.group(2), indent + match.group(1)))
+		else:
+			result.append(indent + i)
+	return result
+
+@
+
+那接下來就是把剝離出的程式碼輸入進檔案：
+
+<<輸出檔案>>=
+if output_chunk == "all":
+	for name in root_chunk:
+		os.system(f"touch {name}")
+		with open(name, "w+") as f:
+			for line in expand(name, ""):
+				f.write(line)
+else:
+	with open(output_chunk, "w+") as f:
+		for line in expand(output_chunk, ""):
+			f.write(line)
+@
+
+最後是處理可選選項，其實也沒有太多可選可選，僅有一個 help 可選。不實作過多的選項是因為過於麻煩，且希望這是一個簡單的工具。
+
+<<處理可選選項>>=
+i = i.strip("--")
+if i == "help":
+	print("This is a Literate Programming tool made by Si Manglam to satisfy his own requirement.\nUsage: sitangle output_chunk_name file")
+	exit(0)
+else:
+	print("Unknown Option")
+	exit(1)
+@
+
+\chapter{weaver}
+
+接下來進入到 weave 的實作，由於最近有幸去看 Donald E. Knuth 的 ``Literate Programming''，發現他的排版確實好看，且有標示出檔案的父區塊與其他區塊的所在位置，非常的有幫助。如果想要實現這個功能，我們會需要一種可以儲存上下級資訊的資料結構，還需要另外一資料結構來儲存同名區塊的順序與標籤。我想這兩個應該可以用樹去儲存資訊，樹負責儲存上下級關係，順序則直接記得出現次數，並把標籤編上號碼即可。
+
+所以我們需要先把樹跟鏈結串列給刻出來，再來去思考後面的東西。那整個檔案結構會看來如下：
+
+<<siweave.py>>=
+<<節點>>
+<<樹>>
+<<全域變數>>
+<<Debug>>
+@
+
+想法是先掃瞄過整個檔案後，建立好所有的節點，每個節點都包含了以下資訊：父節點、子節點與出現次數。在將所有節點都建立好後才會把整個樹串起來，串起來的方式是先找到根節點再慢慢去找其子節點的名稱，並利用子節點的名稱將節點串起來。串起來之後才會進行輸出，但這樣需要至少做兩次檔案讀寫，之後說不定可以找到更好的方法去優化（先等我程設修好修滿）。
+
+\section{樹}
+
+首先我們需要先刻一顆樹出來，我需要兩個資訊，分別是父節點的名稱與其有的子節點。樹還需要提供 Merge 與 Search 的功能，在掃描過整個
+
+\end{document}
